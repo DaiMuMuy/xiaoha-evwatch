@@ -15,9 +15,17 @@ android {
         versionName = "1.0"
     }
 
+    signingConfigs {
+        // CI 里没有正式签名，release 复用 debug keystore，保证能产出可安装的 APK
+        getByName("debug") {
+            // 默认使用 ~/.android/debug.keystore
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
