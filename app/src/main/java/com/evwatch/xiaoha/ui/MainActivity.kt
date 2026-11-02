@@ -10,6 +10,18 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -82,6 +94,7 @@ fun MainScreen(
     requestBlePermissions: (Array<String>, (Map<String, Boolean>) -> Unit) -> Unit = { _, _ -> }
 ) {
     var editing by remember { mutableStateOf(false) }
+    var bleExpanded by remember { mutableStateOf(false) }
     val scroll = rememberScrollState()
     val context = androidx.compose.ui.platform.LocalContext.current
     val bleState by viewModel.bleState.collectAsState()
@@ -103,7 +116,187 @@ fun MainScreen(
                 title = { Text("小哈电巡", fontWeight = FontWeight.SemiBold) },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.background
-                )
+                ),
+                actions = {
+                    // 右上角：二级下拉菜单
+                    var menuOpen by remember { mutableStateOf(false) }
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(
+                            imageVector = Icons.Filled.MoreVert,
+                            contentDescription = "更多",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = menuOpen,
+                        onDismissRequest = { menuOpen = false }
+                    ) {
+                        // —— 蓝牙分组标题 ——
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    "本地蓝牙 " + if (bleState.scanning) "（扫描中）" else "",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            },
+                            onClick = { /* 仅作分组标题 */ }
+                        )
+                        // 扫描 / 停止
+                        if (bleState.scanning) {
+                            DropdownMenuItem(
+                                text = { Text("停止扫描", fontSize = 14.sp) },
+                                onClick = {
+                                    menuOpen = false
+                                    viewModel.stopBle()
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Filled.Close,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            )
+                        } else {
+                            DropdownMenuItem(
+                                text = { Text("扫描附近电池", fontSize = 14.sp) },
+                                onClick = {
+                                    menuOpen = false
+                                    val perms = BleScanner.requiredPermissions(context)
+                                    if (perms.isEmpty()) {
+                                        viewModel.startBle(context)
+                                    } else {
+                                        requestBlePermissions(perms.toTypedArray()) { granted ->
+                                            if (granted.values.all { it }) viewModel.startBle(context)
+                                        }
+                                    }
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Filled.Search,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            )
+                        }
+                        // 异常引导：未开蓝牙 / 未开定位
+                        if (bleState.bluetoothOff) {
+                            DropdownMenuItem(
+                                text = { Text("去开启蓝牙", fontSize = 14.sp) },
+                                onClick = {
+                                    menuOpen = false
+                                    runCatching {
+                                        context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+                                    }
+                                }
+                            )
+                        }
+                        if (bleState.needLocation) {
+                            DropdownMenuItem(
+                                text = { Text("去开启定位服务", fontSize = 14.sp) },
+                                onClick = {
+                                    menuOpen = false
+                                    runCatching {
+                                        context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                                    }
+                                }
+                            )
+                        }
+                        // 设备列表（点选切换）
+                        if (bleState.devices.isNotEmpty()) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        "附近电池（${bleState.devices.size}）",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                },
+                                onClick = { /* 分组标题 */ }
+                            )
+                            bleState.devices.take(8).forEach { d ->
+                                val sel = d.id == bleState.selected
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "${d.id.takeLast(10)} · ${d.percent}% · ${d.rssi}dBm",
+                                            fontSize = 13.sp,
+                                            color = if (sel) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    },
+                                    onClick = {
+                                        menuOpen = false
+                                        viewModel.selectBleDevice(d.id)
+                                    },
+                                    trailingIcon = {
+                                        if (sel) Text("✓", color = MaterialTheme.colorScheme.primary)
+                                    }
+                                )
+                            }
+                        } else if (bleState.status.isNotBlank() && !bleState.scanning) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        bleState.status,
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                },
+                                onClick = { /* 状态提示 */ }
+                            )
+                        }
+                        // 开始监控 / 停止监控（切换）
+                        if (viewModel.running) {
+                            DropdownMenuItem(
+                                text = { Text("停止监控", fontSize = 14.sp) },
+                                onClick = {
+                                    menuOpen = false
+                                    viewModel.stopMonitoring()
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Filled.Close,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            )
+                        } else {
+                            DropdownMenuItem(
+                                text = { Text("开始监控", fontSize = 14.sp) },
+                                onClick = {
+                                    menuOpen = false
+                                    viewModel.startMonitoring()
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Filled.Refresh,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("修改配置", fontSize = 14.sp) },
+                            onClick = {
+                                menuOpen = false
+                                editing = true
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Filled.Settings,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        )
+                    }
+                }
             )
         }
     ) { padding ->
@@ -111,40 +304,18 @@ fun MainScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .padding(horizontal = 12.dp, vertical = 6.dp)
                 .verticalScroll(scroll),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             if (editing || !viewModel.config.isConfigured) {
-                ConfigSection(viewModel, onSaved = { editing = false })
+                ConfigSection(
+                    viewModel,
+                    onSaved = { editing = false },
+                    onExit = { editing = false }
+                )
             } else {
                 SnapshotCard(viewModel, bleState)
-
-                BleCard(
-                    state = bleState,
-                    onStart = {
-                        val perms = BleScanner.requiredPermissions(context)
-                        if (perms.isEmpty()) {
-                            viewModel.startBle(context)
-                        } else {
-                            requestBlePermissions(perms.toTypedArray()) { granted ->
-                                if (granted.values.all { it }) viewModel.startBle(context)
-                            }
-                        }
-                    },
-                    onStop = { viewModel.stopBle() },
-                    onSelect = { viewModel.selectBleDevice(it) },
-                    onOpenBt = {
-                        runCatching {
-                            context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
-                        }
-                    },
-                    onOpenLoc = {
-                        runCatching {
-                            context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
-                        }
-                    }
-                )
 
                 // 单体电压网格（4 列，C01 + 电压）
                 viewModel.snapshot?.let { s ->
@@ -157,28 +328,6 @@ fun MainScreen(
                 viewModel.error?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
                 }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    FilledTonalButton(
-                        onClick = { viewModel.refresh() },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("刷新") }
-                    if (viewModel.running) {
-                        OutlinedButton(
-                            onClick = { viewModel.stopMonitoring() },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("停止监控") }
-                    } else {
-                        Button(
-                            onClick = { viewModel.startMonitoring() },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("开始监控") }
-                    }
-                }
-                TextButton(
-                    onClick = { editing = true },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("修改配置") }
             }
 
             CommsConsole(viewModel)
@@ -229,7 +378,7 @@ private fun CommsConsole(viewModel: MainViewModel) {
             val listState = rememberLazyListState()
             if (entries.isEmpty()) {
                 Text(
-                    "暂无通信记录，点「刷新」或「开始监控」后这里会实时显示。",
+                    "暂无通信记录，点右上角菜单「开始监控」或「扫描附近电池」后这里会实时显示。",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(14.dp)
@@ -239,7 +388,7 @@ private fun CommsConsole(viewModel: MainViewModel) {
                     state = listState,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 260.dp)
+                        .heightIn(max = 200.dp)
                         .padding(horizontal = 12.dp, vertical = 8.dp)
                 ) {
                     items(entries.size) { i ->
@@ -298,12 +447,12 @@ private fun SnapshotCard(viewModel: MainViewModel, bleState: BleScanner.BleState
         Column(
             Modifier
                 .fillMaxWidth()
-                .padding(24.dp),
+                .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
                 text = "${mainPct ?: "--"}%",
-                style = MaterialTheme.typography.displaySmall,
+                fontSize = 42.sp,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface
             )
@@ -318,7 +467,7 @@ private fun SnapshotCard(viewModel: MainViewModel, bleState: BleScanner.BleState
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(10.dp))
 
             // 圆角电量进度条
             if (mainPct != null) {
@@ -331,7 +480,7 @@ private fun SnapshotCard(viewModel: MainViewModel, bleState: BleScanner.BleState
                     color = MaterialTheme.colorScheme.primary,
                     trackColor = MaterialTheme.colorScheme.surfaceVariant
                 )
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(10.dp))
             }
 
             // 两个来源：分段药丸
@@ -352,7 +501,7 @@ private fun SnapshotCard(viewModel: MainViewModel, bleState: BleScanner.BleState
             }
 
             snap?.let { s ->
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(12.dp))
                 // 第一行：电压 / 电流 / 功率
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -365,7 +514,7 @@ private fun SnapshotCard(viewModel: MainViewModel, bleState: BleScanner.BleState
                     VDivider()
                     Metric("功率", s.power?.let { formatPower(it) } ?: "-")
                 }
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(10.dp))
                 // 第二行：串数 / 压差 / MOS
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -383,6 +532,19 @@ private fun SnapshotCard(viewModel: MainViewModel, bleState: BleScanner.BleState
                     VDivider()
                     Metric("MOS", s.mosTemp?.let { "${it.toInt()}℃" } ?: "-")
                 }
+                // 第三行：续航 / 总里程 / 额定容量
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Metric("续航", s.endurance ?: "-")
+                    VDivider()
+                    Metric("总里程", s.totalMileage ?: "-")
+                    VDivider()
+                    Metric("剩余容量", s.remainCapacity ?: "-")
+                }
                 // 单体最高/最低
                 if (s.cellMax != null || s.cellMin != null) {
                     Spacer(Modifier.height(10.dp))
@@ -392,6 +554,38 @@ private fun SnapshotCard(viewModel: MainViewModel, bleState: BleScanner.BleState
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.outline
                     )
+                }
+                // GPS 轨迹（地址或经纬度）+ 位置入口
+                s.lastLocation?.let { loc ->
+                    Spacer(Modifier.height(10.dp))
+                    val gps = loc.address
+                        ?: if (loc.lat != null && loc.lng != null) "${loc.lat}, ${loc.lng}" else null
+                    val ctx = androidx.compose.ui.platform.LocalContext.current
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "📍 ${gps ?: "暂无位置"}",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (loc.lat != null && loc.lng != null) {
+                            Spacer(Modifier.width(8.dp))
+                            TextButton(onClick = {
+                                runCatching {
+                                    val uri = android.net.Uri.parse("geo:${loc.lat},${loc.lng}?q=${loc.lat},${loc.lng}")
+                                    ctx.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                                }
+                            }) {
+                                Text("查看位置", fontSize = 11.sp)
+                            }
+                        }
+                    }
+                    loc.time?.let {
+                        Text("定位时间 $it", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
+                    }
                 }
                 Spacer(Modifier.height(12.dp))
                 Text(
@@ -444,6 +638,7 @@ private fun SourcePill(label: String, value: String?, active: Boolean, modifier:
 @Composable
 private fun BleCard(
     state: BleScanner.BleState,
+    expanded: Boolean,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onSelect: (String) -> Unit,
@@ -451,7 +646,8 @@ private fun BleCard(
     onOpenLoc: () -> Unit
 ) {
     Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.fillMaxWidth().padding(20.dp)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+            // 头部：标题（折叠开关在顶栏右上角）
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -473,61 +669,66 @@ private fun BleCard(
                     )
                 }
             }
-            Spacer(Modifier.height(10.dp))
 
-            state.status.takeIf { !state.scanning && state.selectedPercent == null }?.let {
-                Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+            AnimatedVisibility(visible = expanded) {
+                Column(Modifier.fillMaxWidth()) {
+                    Spacer(Modifier.height(10.dp))
 
-            if (state.needPermission) {
-                Text("需要蓝牙扫描权限", fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
-            }
-            if (state.bluetoothOff) {
-                FilledTonalButton(onClick = onOpenBt, modifier = Modifier.fillMaxWidth()) {
-                    Text("去开启蓝牙")
-                }
-            }
-            if (state.needLocation) {
-                FilledTonalButton(onClick = onOpenLoc, modifier = Modifier.fillMaxWidth()) {
-                    Text("去开启定位服务")
-                }
-            }
-
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (state.scanning) {
-                    OutlinedButton(onClick = onStop, modifier = Modifier.weight(1f)) {
-                        Text("停止扫描")
+                    state.status.takeIf { !state.scanning && state.selectedPercent == null }?.let {
+                        Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                } else {
-                    Button(onClick = onStart, modifier = Modifier.weight(1f)) {
-                        Text("扫描附近电池")
-                    }
-                }
-            }
 
-            if (state.devices.isNotEmpty()) {
-                Spacer(Modifier.height(12.dp))
-                Text("附近电池", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
-                state.devices.take(8).forEach { d ->
-                    val sel = d.id == state.selected
-                    FilterChip(
-                        selected = sel,
-                        onClick = { onSelect(d.id) },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = {
-                            Text("${d.id.takeLast(10)}  ·  ${d.percent}%  ·  ${d.rssi}dBm")
+                    if (state.needPermission) {
+                        Text("需要蓝牙扫描权限", fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (state.bluetoothOff) {
+                        FilledTonalButton(onClick = onOpenBt, modifier = Modifier.fillMaxWidth()) {
+                            Text("去开启蓝牙")
                         }
+                    }
+                    if (state.needLocation) {
+                        FilledTonalButton(onClick = onOpenLoc, modifier = Modifier.fillMaxWidth()) {
+                            Text("去开启定位服务")
+                        }
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        if (state.scanning) {
+                            OutlinedButton(onClick = onStop, modifier = Modifier.weight(1f)) {
+                                Text("停止扫描")
+                            }
+                        } else {
+                            Button(onClick = onStart, modifier = Modifier.weight(1f)) {
+                                Text("扫描附近电池")
+                            }
+                        }
+                    }
+
+                    if (state.devices.isNotEmpty()) {
+                        Spacer(Modifier.height(12.dp))
+                        Text("附近电池", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
+                        state.devices.take(8).forEach { d ->
+                            val sel = d.id == state.selected
+                            FilterChip(
+                                selected = sel,
+                                onClick = { onSelect(d.id) },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = {
+                                    Text("${d.id.takeLast(10)}  ·  ${d.percent}%  ·  ${d.rssi}dBm")
+                                }
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "本地读取：靠近电池即可扫到广播读电量，无需配对、不消耗云端额度。",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.outline
                     )
                 }
             }
-
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "本地读取：靠近电池即可扫到广播读电量，无需配对、不消耗云端额度。",
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.outline
-            )
         }
     }
 }
@@ -540,7 +741,7 @@ private fun CellVoltageGrid(snapshot: com.evwatch.xiaoha.data.model.BatterySnaps
     val diff = snapshot.cellDiff
 
     Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+        Column(Modifier.fillMaxWidth().padding(12.dp)) {
             // 标题行
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -560,7 +761,15 @@ private fun CellVoltageGrid(snapshot: com.evwatch.xiaoha.data.model.BatterySnaps
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.secondary
                         )
-                        Spacer(Modifier.width(10.dp))
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    if (min != null) {
+                        Text(
+                            "最低 ${String.format(Locale.US, "%.0f", min)}",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        Spacer(Modifier.width(8.dp))
                     }
                     if (diff != null) {
                         Text(
@@ -678,12 +887,12 @@ private fun Metric(label: String, value: String, tone: MetricTone = MetricTone.N
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             value,
-            fontSize = 16.sp,
+            fontSize = 15.sp,
             fontWeight = FontWeight.SemiBold,
             color = color
         )
         Spacer(Modifier.height(2.dp))
-        Text(label, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(label, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -714,7 +923,7 @@ private fun SectionTitle(text: String) {
 }
 
 @Composable
-private fun ConfigSection(viewModel: MainViewModel, onSaved: () -> Unit) {
+private fun ConfigSection(viewModel: MainViewModel, onSaved: () -> Unit, onExit: () -> Unit) {
     val cfg = viewModel.config
     var batteryNo by remember(cfg) { mutableStateOf(cfg.batteryNo) }
     var token by remember(cfg) { mutableStateOf(cfg.token) }
@@ -727,6 +936,17 @@ private fun ConfigSection(viewModel: MainViewModel, onSaved: () -> Unit) {
     var milestones by remember(cfg) { mutableStateOf(cfg.milestones) }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        // 顶部：退出配置
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SectionTitle("配置")
+            TextButton(onClick = onExit) {
+                Text("退出 ✕", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
         SectionTitle("连接配置")
         Text(
             "Token / Ticket 来自小哈智电小程序抓包；电池编号留空则自动取账号下第一块电池。",

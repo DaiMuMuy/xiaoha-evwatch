@@ -4,6 +4,7 @@ import android.util.Log
 import com.evwatch.xiaoha.data.crypto.HbCrypto
 import com.evwatch.xiaoha.data.model.ApiException
 import com.evwatch.xiaoha.data.model.BatterySnapshot
+import com.evwatch.xiaoha.data.model.GpsPoint
 import com.evwatch.xiaoha.data.model.WatchConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -146,20 +147,39 @@ class HbApi {
             if (it is ApiException) throw it else JSONObject()
         }
 
-        val chargeStatus = if (detail.has("chargeStatus")) detail.optInt("chargeStatus")
-        else if (status.has("chargeStatus")) status.optInt("chargeStatus") else null
+        // chargeStatus：detail 里是数字，last 里是字符串；统一用字符串判定
+        val chargeStatusRaw = when {
+            detail.has("chargeStatus") -> detail.opt("chargeStatus")?.toString()
+            status.has("chargeStatus") -> status.opt("chargeStatus")?.toString()
+            else -> null
+        }
+        val chargeStatusCode = chargeStatusRaw?.toIntOrNull()
+        val charging = when (chargeStatusRaw) {
+            "1" -> true
+            "-1", "0" -> false
+            else -> (status.optDoubleOrNull("current") ?: 0.0) > 0.1
+        }
 
-        val voltage = status.optDoubleOrNull("voltage") ?: detail.optDoubleOrNull("volt")
+        // 电压：status.voltage 是真实总电压，detail.volt 是额定值
+        val voltage = status.optDoubleOrNull("voltage")
+        val ratedVoltage = detail.optDoubleOrNull("volt")
         val current = status.optDoubleOrNull("current")
 
-        // 单体电压列表 → 串数 / 压差
+        // 单体电压列表 → 串数 / 压差（cellMaxVoltage 带 "/V" 单位）
         val cells = parseCellVoltages(status)
-        val cellMax = cells.maxOrNull() ?: status.optDoubleOrNull("cellMaxVoltage")?.let { toMv(it) }
-        val cellMin = cells.minOrNull() ?: status.optDoubleOrNull("cellMinVoltage")?.let { toMv(it) }
+        val cellMax = cells.maxOrNull() ?: parseVoltageWithUnit(status.optString("cellMaxVoltage"))
+        val cellMin = cells.minOrNull() ?: parseVoltageWithUnit(status.optString("cellMinVoltage"))
         val cellCount = cells.size.takeIf { it > 0 }
             ?: detail.optIntOrNull("cellCount")?.takeIf { it > 0 }
         val cellDiff = if (cellMax != null && cellMin != null) cellMax - cellMin else null
         val power = if (voltage != null && current != null) voltage * current else null
+
+        // 续航 / 总里程（字符串带单位）
+        val endurance = detail.optString("endurance").takeIf { it.isNotBlank() }
+        val totalMileage = detail.optString("totalMileages").takeIf { it.isNotBlank() }
+
+        // GPS 轨迹（最近一点）
+        val lastLocation = runCatching { batteryTrack(config, batteryNo) }.getOrNull()
 
         BatterySnapshot(
             batteryNo = batteryNo,
@@ -167,15 +187,18 @@ class HbApi {
                 detail.has("batteryLife") -> detail.optInt("batteryLife")
                 else -> null
             },
-            charging = isCharging(chargeStatus, status),
-            chargeStatus = chargeStatus,
+            charging = charging,
+            chargeStatus = chargeStatusCode,
             voltage = voltage,
+            ratedVoltage = ratedVoltage,
             current = current,
             envTemp = status.optDoubleOrNull("envTemperature"),
             mosTemp = status.optDoubleOrNull("mosTemperature"),
             soh = detail.optIntOrNull("soh"),
             cycles = detail.optString("chargeCount").takeIf { it.isNotBlank() },
-            remainCapacity = detail.optDoubleOrNull("remainCapacity"),
+            remainCapacity = detail.optString("remainCapacity").takeIf { it.isNotBlank() },
+            endurance = endurance,
+            totalMileage = totalMileage,
             reportTime = detail.optString("batteryLifeTimestamp")
                 .ifBlank { detail.optString("reportTime") }
                 .takeIf { it.isNotBlank() },
@@ -184,7 +207,26 @@ class HbApi {
             cellDiff = cellDiff,
             cellMax = cellMax,
             cellMin = cellMin,
-            cellVoltages = cells
+            cellVoltages = cells,
+            lastLocation = lastLocation
+        )
+    }
+
+    /** GPS 轨迹：取最近一个轨迹点 */
+    private fun batteryTrack(config: WatchConfig, batteryNo: String): GpsPoint? {
+        val action = "swp.li.user.battery.track"
+        val p = basePayload(action)
+        p.put("batteryNo", batteryNo)
+        auth(p, config)
+        val data = post(action, p).opt("data") as? JSONObject ?: return null
+        val tracks = data.optJSONArray("tracks") ?: return null
+        if (tracks.length() == 0) return null
+        val t = tracks.optJSONObject(tracks.length() - 1) ?: return null
+        return GpsPoint(
+            lng = t.optDoubleOrNull("lng"),
+            lat = t.optDoubleOrNull("lat"),
+            address = t.optString("address").takeIf { it.isNotBlank() },
+            time = t.optString("locateTime").takeIf { it.isNotBlank() }
         )
     }
 
@@ -199,14 +241,18 @@ class HbApi {
         return out
     }
 
+    /** 电压字符串可能带单位，如 "3.298/V"；统一取数值并转 mV */
+    private fun parseVoltageWithUnit(s: String?): Double? {
+        if (s.isNullOrBlank()) return null
+        val num = s.split("/").first().trim().toDoubleOrNull() ?: return null
+        return toMv(num)
+    }
+
     /** 单位可能是 V(如 3.45) 或 mV(如 3450)，统一转 mV */
     private fun toMv(v: Double): Double = if (v < 100) v * 1000 else v
 
-    private fun isCharging(chargeStatus: Int?, status: JSONObject): Boolean {
-        if (chargeStatus != null) return chargeStatus == 1
-        val cur = status.optDoubleOrNull("current")
-        return cur != null && cur > 0.1
-    }
+    private fun String.toIntOrNull(): Int? =
+        runCatching { toInt() }.getOrNull()
 
     private fun JSONObject.optDoubleOrNull(key: String): Double? {
         if (!has(key) || isNull(key)) return null
