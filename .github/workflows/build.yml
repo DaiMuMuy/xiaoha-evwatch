@@ -12,6 +12,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      # GitHub runner 已预装 Android SDK，直接用
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,8 +28,14 @@ jobs:
           distribution: "temurin"
           cache: gradle
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Accept Android SDK licenses
+        run: |
+          if [ -d "$ANDROID_HOME" ]; then
+            mkdir -p "$ANDROID_HOME/licenses"
+            printf '24333f8a63b6825ea9c5514f83c2829b004d1fee\n' > "$ANDROID_HOME/licenses/android-sdk-license"
+            printf '84831b9409646a918e30573bab4c9c91346d8abd\n' > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+            printf 'd975f751698a77b662f1254ddbeed3901e976f5a\n' > "$ANDROID_HOME/licenses/intel-android-extra-license"
+          fi
 
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
