@@ -149,6 +149,18 @@ class HbApi {
         val chargeStatus = if (detail.has("chargeStatus")) detail.optInt("chargeStatus")
         else if (status.has("chargeStatus")) status.optInt("chargeStatus") else null
 
+        val voltage = status.optDoubleOrNull("voltage") ?: detail.optDoubleOrNull("volt")
+        val current = status.optDoubleOrNull("current")
+
+        // 单体电压列表 → 串数 / 压差
+        val cells = parseCellVoltages(status)
+        val cellMax = cells.maxOrNull() ?: status.optDoubleOrNull("cellMaxVoltage")?.let { toMv(it) }
+        val cellMin = cells.minOrNull() ?: status.optDoubleOrNull("cellMinVoltage")?.let { toMv(it) }
+        val cellCount = cells.size.takeIf { it > 0 }
+            ?: detail.optIntOrNull("cellCount")?.takeIf { it > 0 }
+        val cellDiff = if (cellMax != null && cellMin != null) cellMax - cellMin else null
+        val power = if (voltage != null && current != null) voltage * current else null
+
         BatterySnapshot(
             batteryNo = batteryNo,
             soc = when {
@@ -157,8 +169,8 @@ class HbApi {
             },
             charging = isCharging(chargeStatus, status),
             chargeStatus = chargeStatus,
-            voltage = status.optDoubleOrNull("voltage") ?: detail.optDoubleOrNull("volt"),
-            current = status.optDoubleOrNull("current"),
+            voltage = voltage,
+            current = current,
             envTemp = status.optDoubleOrNull("envTemperature"),
             mosTemp = status.optDoubleOrNull("mosTemperature"),
             soh = detail.optIntOrNull("soh"),
@@ -166,9 +178,29 @@ class HbApi {
             remainCapacity = detail.optDoubleOrNull("remainCapacity"),
             reportTime = detail.optString("batteryLifeTimestamp")
                 .ifBlank { detail.optString("reportTime") }
-                .takeIf { it.isNotBlank() }
+                .takeIf { it.isNotBlank() },
+            cellCount = cellCount,
+            power = power,
+            cellDiff = cellDiff,
+            cellMax = cellMax,
+            cellMin = cellMin,
+            cellVoltages = cells
         )
     }
+
+    /** 解析单体电压列表并统一成 mV */
+    private fun parseCellVoltages(status: JSONObject): List<Double> {
+        val arr = status.optJSONArray("cellVoltageList") ?: return emptyList()
+        val out = mutableListOf<Double>()
+        for (i in 0 until arr.length()) {
+            val v = arr.optDouble(i, Double.NaN)
+            if (!v.isNaN() && v > 0) out.add(toMv(v))
+        }
+        return out
+    }
+
+    /** 单位可能是 V(如 3.45) 或 mV(如 3450)，统一转 mV */
+    private fun toMv(v: Double): Double = if (v < 100) v * 1000 else v
 
     private fun isCharging(chargeStatus: Int?, status: JSONObject): Boolean {
         if (chargeStatus != null) return chargeStatus == 1

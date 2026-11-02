@@ -36,6 +36,13 @@ data class BatterySnapshot(
     val cycles: String? = null,
     val remainCapacity: Double? = null,
     val reportTime: String? = null,
+    // 串数（单体个数 S）、功率(W)、压差(mV)、单体最高/最低(mV)、单体电压列表
+    val cellCount: Int? = null,
+    val power: Double? = null,
+    val cellDiff: Double? = null,
+    val cellMax: Double? = null,
+    val cellMin: Double? = null,
+    val cellVoltages: List<Double> = emptyList(),
     val ts: Long = System.currentTimeMillis()
 )
 

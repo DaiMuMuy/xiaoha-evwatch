@@ -2,6 +2,7 @@ package com.evwatch.xiaoha.ui
 
 import android.content.Context
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
@@ -12,6 +13,7 @@ import com.evwatch.xiaoha.data.model.WatchConfig
 import com.evwatch.xiaoha.data.network.HbApi
 import com.evwatch.xiaoha.data.notify.Notifier
 import com.evwatch.xiaoha.data.repository.ConfigRepository
+import com.evwatch.xiaoha.ble.BleScanner
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -41,8 +43,12 @@ class MainViewModel(
         private set
     var log by mutableStateOf("")
         private set
+    val logEntries = mutableStateListOf<LogEntry>()
     var running by mutableStateOf(false)
         private set
+
+    /** 本地蓝牙扫描状态（来自 BleScanner 单例） */
+    val bleState = BleScanner.state
 
     private var pollJob: Job? = null
     private val prefs = appContext.getSharedPreferences("evwatch_state", Context.MODE_PRIVATE)
@@ -69,7 +75,7 @@ class MainViewModel(
         viewModelScope.launch {
             repository.save(config)
             error = null
-            appendLog("配置已保存")
+            addLog(LogType.INFO, "配置已保存")
         }
     }
 
@@ -85,15 +91,17 @@ class MainViewModel(
             try {
                 val snap = api.snapshot(cfg)
                 snapshot = snap
-                appendLog(formatSnapshot(snap))
+                addLog(LogType.CLOUD, "请求云端: batteryInfo.status (电池:${snap.batteryNo})")
+                addLog(LogType.CLOUD_OK, "响应成功: HTTP 200 OK | code:0")
+                addLog(LogType.TELEMETRY, formatSnapshot(snap))
                 evaluateAlerts(snap)
             } catch (e: ApiException) {
                 error = if (e.isLoginExpired) "登录信息已失效（code=103），请重新抓包更新 Token / Ticket"
                 else "接口错误：${e.message}"
-                appendLog(error!!)
+                addLog(LogType.ERROR, error!!)
             } catch (e: Exception) {
                 error = "请求失败：${e.message}"
-                appendLog(error!!)
+                addLog(LogType.ERROR, error!!)
             } finally {
                 loading = false
             }
@@ -121,6 +129,24 @@ class MainViewModel(
     override fun onCleared() {
         stopMonitoring()
         super.onCleared()
+    }
+
+    // ---------------- 本地蓝牙 ----------------
+
+    fun startBle(context: Context) {
+        BleScanner.start(context)
+    }
+
+    fun stopBle() {
+        BleScanner.stop()
+    }
+
+    fun selectBleDevice(id: String) {
+        BleScanner.select(id)
+    }
+
+    fun addBleLog(text: String) {
+        addLog(LogType.BLE, text)
     }
 
     // ---------------- 告警状态机 ----------------
@@ -180,7 +206,7 @@ class MainViewModel(
             .apply()
 
         messages.forEach { msg ->
-            appendLog("🔔 $msg")
+            addLog(LogType.ALERT, msg)
             viewModelScope.launch {
                 Notifier.push(
                     appContext, msg,
@@ -204,7 +230,35 @@ class MainViewModel(
     private fun timeNow(): String =
         java.text.SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(java.util.Date())
 
+    private fun addLog(type: LogType, text: String) {
+        logEntries.add(0, LogEntry(timeNow(), type, text))
+        if (logEntries.size > 200) logEntries.removeAt(logEntries.lastIndex)
+        appendLog("${type.icon} [${type.tag}] $text")
+    }
+
     private fun appendLog(line: String) {
         log = (line + "\n" + log).lines().take(120).joinToString("\n")
     }
+
+    fun clearLog() {
+        logEntries.clear()
+    }
+}
+
+/** 通讯台日志条目 */
+data class LogEntry(
+    val time: String,
+    val type: LogType,
+    val text: String
+)
+
+enum class LogType(val icon: String, val tag: String) {
+    TELEMETRY("📡", "遥测状态"),
+    CLOUD("☁️", "请求云端"),
+    CLOUD_OK("✅", "响应成功"),
+    BLE("🔵", "蓝牙状态"),
+    BLE_PUSH("📲", "蓝牙推送"),
+    ALERT("🔔", "提醒"),
+    INFO("ℹ️", "信息"),
+    ERROR("⚠️", "错误")
 }
