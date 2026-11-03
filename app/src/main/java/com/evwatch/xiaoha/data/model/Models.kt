@@ -51,6 +51,13 @@ data class BatterySnapshot(
     val ts: Long = System.currentTimeMillis()
 )
 
+/** 充电限流设定 */
+data class ChargeLimit(
+    val current: Int? = null,      // 当前限流(A)
+    val maxCurrent: Int = 20,      // 允许最大
+    val minCurrent: Int = 1        // 允许最小
+)
+
 /** GPS 轨迹点 */
 data class GpsPoint(
     val lng: Double? = null,

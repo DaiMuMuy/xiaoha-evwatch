@@ -15,6 +15,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
@@ -281,6 +282,36 @@ fun MainScreen(
                                 }
                             )
                         }
+                        // GPS 定位入口
+                        DropdownMenuItem(
+                            text = { Text("定位", fontSize = 14.sp) },
+                            onClick = {
+                                menuOpen = false
+                                val loc = viewModel.snapshot?.lastLocation
+                                if (loc?.lat != null && loc?.lng != null) {
+                                    runCatching {
+                                        val uri = android.net.Uri.parse(
+                                            "geo:${loc.lat},${loc.lng}?q=${loc.lat},${loc.lng}"
+                                        )
+                                        context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                                    }
+                                } else {
+                                    viewModel.refresh()
+                                }
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Filled.LocationOn,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            },
+                            trailingIcon = {
+                                if (viewModel.snapshot?.lastLocation != null) {
+                                    Text("已定位", fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                        )
                         DropdownMenuItem(
                             text = { Text("修改配置", fontSize = 14.sp) },
                             onClick = {
@@ -545,6 +576,68 @@ private fun SnapshotCard(viewModel: MainViewModel, bleState: BleScanner.BleState
                     VDivider()
                     Metric("剩余容量", s.remainCapacity ?: "-")
                 }
+
+                // 充电限流控制（写操作，实测接口可用）
+                val limit = viewModel.chargeLimit
+                if (limit != null) {
+                    Spacer(Modifier.height(14.dp))
+                    Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "充电限流",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            "${limit.current ?: "-"} A",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Text(
+                        "允许范围 ${limit.minCurrent}~${limit.maxCurrent} A",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                    // 滑块 + 快捷档位
+                    var sliderVal by remember(limit.current) {
+                        mutableFloatStateOf((limit.current ?: limit.minCurrent).toFloat())
+                    }
+                    Slider(
+                        value = sliderVal,
+                        onValueChange = { sliderVal = it },
+                        valueRange = limit.minCurrent.toFloat()..limit.maxCurrent.toFloat(),
+                        steps = (limit.maxCurrent - limit.minCurrent - 1).coerceAtLeast(0),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { viewModel.setChargeLimit(sliderVal.toInt()) },
+                            enabled = !viewModel.settingLimit,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(if (viewModel.settingLimit) "设置中…" else "设为 ${sliderVal.toInt()}A")
+                        }
+                        // 快捷：最低/中间/最高
+                        listOf(limit.minCurrent, (limit.maxCurrent + limit.minCurrent) / 2, limit.maxCurrent)
+                            .forEach { v ->
+                                OutlinedButton(
+                                    onClick = {
+                                        sliderVal = v.toFloat()
+                                        viewModel.setChargeLimit(v)
+                                    },
+                                    enabled = !viewModel.settingLimit
+                                ) { Text("${v}A") }
+                            }
+                    }
+                }
                 // 单体最高/最低
                 if (s.cellMax != null || s.cellMin != null) {
                     Spacer(Modifier.height(10.dp))
@@ -555,37 +648,40 @@ private fun SnapshotCard(viewModel: MainViewModel, bleState: BleScanner.BleState
                         color = MaterialTheme.colorScheme.outline
                     )
                 }
-                // GPS 轨迹（地址或经纬度）+ 位置入口
-                s.lastLocation?.let { loc ->
-                    Spacer(Modifier.height(10.dp))
-                    val gps = loc.address
-                        ?: if (loc.lat != null && loc.lng != null) "${loc.lat}, ${loc.lng}" else null
-                    val ctx = androidx.compose.ui.platform.LocalContext.current
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            "📍 ${gps ?: "暂无位置"}",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f)
-                        )
-                        if (loc.lat != null && loc.lng != null) {
-                            Spacer(Modifier.width(8.dp))
-                            TextButton(onClick = {
-                                runCatching {
-                                    val uri = android.net.Uri.parse("geo:${loc.lat},${loc.lng}?q=${loc.lat},${loc.lng}")
-                                    ctx.startActivity(Intent(Intent.ACTION_VIEW, uri))
-                                }
-                            }) {
-                                Text("查看位置", fontSize = 11.sp)
+                // GPS 轨迹（无论有无数据都显示入口）
+                Spacer(Modifier.height(10.dp))
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                val loc = s.lastLocation
+                val gps = loc?.address
+                    ?: if (loc?.lat != null && loc?.lng != null) "${loc.lat}, ${loc.lng}" else null
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "📍 ${gps ?: "暂无定位（云端未返回轨迹）"}",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    // 有坐标 → 跳转地图；有地址无坐标 → 仅显示地址；都没有 → 提示
+                    if (loc?.lat != null && loc?.lng != null) {
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(onClick = {
+                            runCatching {
+                                val uri = android.net.Uri.parse("geo:${loc.lat},${loc.lng}?q=${loc.lat},${loc.lng}")
+                                ctx.startActivity(Intent(Intent.ACTION_VIEW, uri))
                             }
+                        }) {
+                            Text("查看位置", fontSize = 11.sp)
                         }
+                    } else if (loc?.address != null) {
+                        Spacer(Modifier.width(8.dp))
+                        Text("仅地址", fontSize = 10.sp, color = MaterialTheme.colorScheme.outline)
                     }
-                    loc.time?.let {
-                        Text("定位时间 $it", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
-                    }
+                }
+                loc?.time?.let {
+                    Text("定位时间 $it", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
                 }
                 Spacer(Modifier.height(12.dp))
                 Text(

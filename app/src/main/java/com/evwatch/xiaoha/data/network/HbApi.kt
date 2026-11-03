@@ -4,6 +4,7 @@ import android.util.Log
 import com.evwatch.xiaoha.data.crypto.HbCrypto
 import com.evwatch.xiaoha.data.model.ApiException
 import com.evwatch.xiaoha.data.model.BatterySnapshot
+import com.evwatch.xiaoha.data.model.ChargeLimit
 import com.evwatch.xiaoha.data.model.GpsPoint
 import com.evwatch.xiaoha.data.model.WatchConfig
 import kotlinx.coroutines.Dispatchers
@@ -212,22 +213,84 @@ class HbApi {
         )
     }
 
-    /** GPS 轨迹：取最近一个轨迹点 */
+    /**
+     * 读取充电限流（实测可用）
+     * action: swp.li.user.battery.getMaxChgCurrent
+     * 返回: {"current":5,"text":"充电限流","maxCurrent":20,"minCurrent":1}
+     */
+    suspend fun getMaxChgCurrent(config: WatchConfig, batteryNo: String): ChargeLimit? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val action = "swp.li.user.battery.getMaxChgCurrent"
+                val p = basePayload(action)
+                p.put("batteryNo", batteryNo)
+                auth(p, config)
+                val d = post(action, p).opt("data") as? JSONObject ?: return@runCatching null
+                ChargeLimit(
+                    current = d.optIntOrNull("current"),
+                    maxCurrent = d.optIntOrNull("maxCurrent") ?: 20,
+                    minCurrent = d.optIntOrNull("minCurrent") ?: 1
+                )
+            }.getOrNull()
+        }
+
+    /**
+     * 设置充电限流（实测可用，写操作！）
+     * action: swp.li.user.battery.setMaxChgCurrent
+     * 参数: batteryNo + current（整数，范围 minCurrent~maxCurrent，实测 1~20A）
+     * 成功返回 data: true
+     */
+    suspend fun setMaxChgCurrent(config: WatchConfig, batteryNo: String, amps: Int): Boolean =
+        withContext(Dispatchers.IO) {
+            val action = "swp.li.user.battery.setMaxChgCurrent"
+            val p = basePayload(action)
+            p.put("batteryNo", batteryNo)
+            p.put("current", amps)   // 必须是整数，字符串会 401
+            auth(p, config)
+            val res = post(action, p)
+            res.optBoolean("data", false) || res.optInt("code", -1) == 0
+        }
+
+    /**
+     * GPS 轨迹（真实抓包解密确认的参数）：
+     *   请求用 deviceId（不是 batteryNo）+ scene/correctionType/lastMinute/supportBell
+     *   响应: data.location（address/lng/lat/locateTime）+ data.tracks[]（多点轨迹）
+     * 取最近定位点（优先 location，其次 tracks 末点）；缺失不崩。
+     */
     private fun batteryTrack(config: WatchConfig, batteryNo: String): GpsPoint? {
         val action = "swp.li.user.battery.track"
         val p = basePayload(action)
-        p.put("batteryNo", batteryNo)
+        p.put("deviceId", batteryNo)      // 抓包实测：这里叫 deviceId
+        p.put("scene", 0)
+        p.put("correctionType", "0")
+        p.put("lastMinute", 120)
+        p.put("supportBell", false)
         auth(p, config)
         val data = post(action, p).opt("data") as? JSONObject ?: return null
-        val tracks = data.optJSONArray("tracks") ?: return null
-        if (tracks.length() == 0) return null
-        val t = tracks.optJSONObject(tracks.length() - 1) ?: return null
-        return GpsPoint(
-            lng = t.optDoubleOrNull("lng"),
-            lat = t.optDoubleOrNull("lat"),
-            address = t.optString("address").takeIf { it.isNotBlank() },
-            time = t.optString("locateTime").takeIf { it.isNotBlank() }
-        )
+
+        // 地址：data.location.address（也可能在 location 直接是字符串）
+        // 优先用 data.location：含 address / lng / lat / locateTime（实测这是当前定位）
+        val locObj = data.opt("location") as? JSONObject
+        val address = locObj?.optString("address")?.takeIf { it.isNotBlank() }
+            ?: (data.opt("location") as? String)?.takeIf { it.isNotBlank() }
+        val lng = locObj?.optDoubleOrNull("lng")
+        val lat = locObj?.optDoubleOrNull("lat")
+        val time = locObj?.opt("locateTime")?.toString()?.takeIf { it.isNotBlank() }
+
+        if (address != null || (lng != null && lat != null)) {
+            return GpsPoint(lng = lng, lat = lat, address = address, time = time)
+        }
+
+        // 备用：data.tracks[] 最后一点
+        val tracks = data.optJSONArray("tracks")
+        val t = if (tracks != null && tracks.length() > 0)
+            tracks.optJSONObject(tracks.length() - 1) else null
+        val tLng = t?.optDoubleOrNull("lng")
+        val tLat = t?.optDoubleOrNull("lat")
+        val tTime = t?.opt("locateTime")?.toString()?.takeIf { it.isNotBlank() }
+
+        return if (tLng == null && tLat == null) null
+        else GpsPoint(lng = tLng, lat = tLat, address = null, time = tTime)
     }
 
     /** 解析单体电压列表并统一成 mV */

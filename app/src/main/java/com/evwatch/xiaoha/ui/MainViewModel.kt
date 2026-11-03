@@ -9,6 +9,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.evwatch.xiaoha.data.model.ApiException
 import com.evwatch.xiaoha.data.model.BatterySnapshot
+import com.evwatch.xiaoha.data.model.ChargeLimit
 import com.evwatch.xiaoha.data.model.WatchConfig
 import com.evwatch.xiaoha.data.network.HbApi
 import com.evwatch.xiaoha.data.notify.Notifier
@@ -49,6 +50,12 @@ class MainViewModel(
 
     /** 本地蓝牙扫描状态（来自 BleScanner 单例） */
     val bleState = BleScanner.state
+
+    /** 充电限流设定 */
+    var chargeLimit by mutableStateOf<ChargeLimit?>(null)
+        private set
+    var settingLimit by mutableStateOf(false)
+        private set
 
     private var pollJob: Job? = null
     private val prefs = appContext.getSharedPreferences("evwatch_state", Context.MODE_PRIVATE)
@@ -94,6 +101,7 @@ class MainViewModel(
                 addLog(LogType.CLOUD, "请求云端: batteryInfo.status (电池:${snap.batteryNo})")
                 addLog(LogType.CLOUD_OK, "响应成功: HTTP 200 OK | code:0")
                 addLog(LogType.TELEMETRY, formatSnapshot(snap))
+                loadChargeLimit()
                 evaluateAlerts(snap)
             } catch (e: ApiException) {
                 error = if (e.isLoginExpired) "登录信息已失效（code=103），请重新抓包更新 Token / Ticket"
@@ -147,6 +155,52 @@ class MainViewModel(
 
     fun addBleLog(text: String) {
         addLog(LogType.BLE, text)
+    }
+
+    // ---------------- 充电限流（写操作） ----------------
+
+    /** 读取当前充电限流 */
+    fun loadChargeLimit() {
+        val cfg = config
+        if (!cfg.isConfigured) return
+        viewModelScope.launch {
+            val no = snapshot?.batteryNo ?: cfg.batteryNo.trim()
+            if (no.isEmpty()) return@launch
+            val result: ChargeLimit? = api.getMaxChgCurrent(cfg, no)
+            if (result != null) chargeLimit = result
+        }
+    }
+
+    /** 设置充电限流（安培） */
+    fun setChargeLimit(amps: Int) {
+        val cfg = config
+        val limit = chargeLimit
+        if (!cfg.isConfigured) { error = "请先配置 Token / Ticket"; return }
+        val no = snapshot?.batteryNo ?: cfg.batteryNo.trim()
+        if (no.isEmpty()) { error = "未获取到电池编号"; return }
+        val v = amps.coerceIn(limit?.minCurrent ?: 1, limit?.maxCurrent ?: 20)
+        settingLimit = true
+        viewModelScope.launch {
+            try {
+                val ok = api.setMaxChgCurrent(cfg, no, v)
+                if (ok) {
+                    chargeLimit = (chargeLimit ?: ChargeLimit()).copy(current = v)
+                    addLog(LogType.CLOUD_OK, "充电限流已设为 ${v}A")
+                } else {
+                    error = "设置失败，服务端未确认"
+                    addLog(LogType.ERROR, "设置充电限流失败")
+                }
+            } catch (e: ApiException) {
+                val msg = if (e.code == 401) "操作过于频繁，请稍后再试" else "接口错误：${e.message}"
+                error = msg
+                addLog(LogType.ERROR, msg)
+            } catch (e: Exception) {
+                error = "设置失败：${e.message}"
+                addLog(LogType.ERROR, "设置充电限流失败：${e.message}")
+            } finally {
+                settingLimit = false
+            }
+        }
     }
 
     // ---------------- 告警状态机 ----------------
